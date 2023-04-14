@@ -76,6 +76,12 @@ func Exchange(m *Msg, a string) (r *Msg, err error) {
 	return r, err
 }
 
+func ExchangeWithSource(m *Msg, a string, localAddr string) (r *Msg, err error) {
+	client := Client{Net: "udp"}
+	r, _, err = client.ExchangeWithSource(m, a, localAddr)
+	return r, err
+}
+
 func (c *Client) dialTimeout() time.Duration {
 	if c.Timeout != 0 {
 		return c.Timeout
@@ -141,6 +147,58 @@ func (c *Client) DialContext(ctx context.Context, address string) (conn *Conn, e
 	return conn, nil
 }
 
+// DialContext connects to the address on the named network, with a context.Context.
+func (c *Client) DialContextWithSource(ctx context.Context, address string, localAddr string) (conn *Conn, err error) {
+	// create a new dialer with the appropriate timeout
+
+	ipaddr, err := net.ResolveIPAddr("ip", localAddr)
+	setlocal := false
+	var localUDPAddr net.UDPAddr
+	if err == nil {
+		localUDPAddr = net.UDPAddr{
+			IP: ipaddr.IP,
+		}
+		setlocal = true
+	}
+
+	var d net.Dialer
+	if c.Dialer == nil {
+		if setlocal {
+			d = net.Dialer{LocalAddr: &localUDPAddr, Timeout: c.getTimeoutForRequest(c.dialTimeout())}
+		} else {
+			d = net.Dialer{Timeout: c.getTimeoutForRequest(c.dialTimeout())}
+		}
+
+	} else {
+		d = *c.Dialer
+	}
+
+	network := c.Net
+	if network == "" {
+		network = "udp"
+	}
+
+	useTLS := strings.HasPrefix(network, "tcp") && strings.HasSuffix(network, "-tls")
+
+	conn = new(Conn)
+	if useTLS {
+		network = strings.TrimSuffix(network, "-tls")
+
+		tlsDialer := tls.Dialer{
+			NetDialer: &d,
+			Config:    c.TLSConfig,
+		}
+		conn.Conn, err = tlsDialer.DialContext(ctx, network, address)
+	} else {
+		conn.Conn, err = d.DialContext(ctx, network, address)
+	}
+	if err != nil {
+		return nil, err
+	}
+	conn.UDPSize = c.UDPSize
+	return conn, nil
+}
+
 // Exchange performs a synchronous query. It sends the message m to the address
 // contained in a and waits for a reply. Basic use pattern with a *dns.Client:
 //
@@ -157,6 +215,16 @@ func (c *Client) DialContext(ctx context.Context, address string) (conn *Conn, e
 // attribute appropriately
 func (c *Client) Exchange(m *Msg, address string) (r *Msg, rtt time.Duration, err error) {
 	co, err := c.Dial(address)
+
+	if err != nil {
+		return nil, 0, err
+	}
+	defer co.Close()
+	return c.ExchangeWithConn(m, co)
+}
+
+func (c *Client) ExchangeWithSource(m *Msg, address string, localAddr string) (r *Msg, rtt time.Duration, err error) {
+	co, err := c.DialContextWithSource(context.Background(), address, localAddr)
 
 	if err != nil {
 		return nil, 0, err
